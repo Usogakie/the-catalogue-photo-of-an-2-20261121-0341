@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""TOAST-O-FROST: catalogue photo of an impossible gadget.
-
-A brushed-chrome 2-slice toaster that toasts ice cubes. Pure standard
-library: a small software rasteriser renders the studio product shot and
-a hand-rolled PNG encoder (zlib + struct) writes it out.
-
-Deterministic: fixed seed, no wall-clock, no unseeded randomness.
-Output: 1024x1024 PNG, written to $ENTRY_OUTPUT (default /output/entry.png).
 """
+TOAST-O-FROST -- The Catalogue Photo of an Impossible Gadget.
 
+A pure-stdlib Python program that paints a 1024x1024 catalogue photograph
+of an impossible gadget: a brushed-chrome toaster that toasts ice cubes.
+It writes /output/entry.png (PNG, 1024x1024, at most 1 MiB).
+
+The gadget: "TOAST-O-FROST / 1200W - CRISP ICE". A glowing ice cube pops
+out of its slot, steaming, while a white plate holds one spare ice cube
+as the single accessory. Shot as a clean studio product photo.
+
+Deterministic: fixed RNG seed, no clock, no network, no third-party libs.
+Identical bytes on every run.
+"""
+import hashlib
 import math
 import os
 import random
@@ -16,463 +21,407 @@ import struct
 import zlib
 
 W = H = 1024
+OUT = "/output/entry.png"
 SEED = 20261121
 
-
-def clamp(v, a, b):
-    return a if v < a else (b if v > b else v)
-
-
-def lerp(a, b, t):
-    return a + (b - a) * t
+rng = random.Random(SEED)
+canvas = [bytearray(W * 3) for _ in range(H)]
 
 
-def lerp_c(c1, c2, t):
-    return (int(round(lerp(c1[0], c2[0], t))),
-            int(round(lerp(c1[1], c2[1], t))),
-            int(round(lerp(c1[2], c2[2], t))))
+def _clamp(v):
+    return 0 if v < 0 else (255 if v > 255 else int(v))
 
 
-# ---------------------------------------------------------------- rasteriser
+def _blend_row(row, x0, x1, r, g, b, a=255):
+    if x1 < x0 or a <= 0:
+        return
+    if x0 < 0:
+        x0 = 0
+    if x1 > W - 1:
+        x1 = W - 1
+    if a >= 255:
+        row[x0 * 3:(x1 + 1) * 3] = bytes((r, g, b)) * (x1 - x0 + 1)
+        return
+    inv = 255 - a
+    for x in range(x0, x1 + 1):
+        i = x * 3
+        row[i] = (r * a + row[i] * inv) // 255
+        row[i + 1] = (g * a + row[i + 1] * inv) // 255
+        row[i + 2] = (b * a + row[i + 2] * inv) // 255
 
-class Canvas:
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.buf = bytearray(w * h * 3)
 
-    def span(self, y, x0, x1, c):
-        """Solid horizontal span, clipped."""
-        if y < 0 or y >= self.h:
-            return
-        x0 = max(0, int(x0))
-        x1 = min(self.w, int(x1))
-        if x1 <= x0:
-            return
-        base = (y * self.w + x0) * 3
-        self.buf[base:(y * self.w + x1) * 3] = bytes(c) * (x1 - x0)
+def fill_rect(x, y, w, h, rgb, a=255):
+    r, g, b = rgb
+    y0 = max(0, y)
+    y1 = min(H - 1, y + h - 1)
+    for yy in range(y0, y1 + 1):
+        _blend_row(canvas[yy], x, x + w - 1, r, g, b, a)
 
-    def blend_span(self, y, x0, x1, c, a):
-        """Alpha-blended horizontal span (a: 0..255)."""
-        if a <= 0 or y < 0 or y >= self.h:
-            return
-        if a >= 255:
-            self.span(y, x0, x1, c)
-            return
-        x0 = max(0, int(x0))
-        x1 = min(self.w, int(x1))
-        if x1 <= x0:
-            return
-        buf = self.buf
-        r, g, b = c
-        ia = 255 - a
-        for x in range(x0, x1):
-            i = (y * self.w + x) * 3
-            buf[i] = (buf[i] * ia + r * a) // 255
-            buf[i + 1] = (buf[i + 1] * ia + g * a) // 255
-            buf[i + 2] = (buf[i + 2] * ia + b * a) // 255
 
-    def blend_pixel(self, x, y, c, a):
-        if a <= 0 or x < 0 or x >= self.w or y < 0 or y >= self.h:
-            return
-        if a >= 255:
-            i = (y * self.w + x) * 3
-            self.buf[i:i + 3] = bytes(c)
-            return
-        i = (y * self.w + x) * 3
-        buf = self.buf
-        ia = 255 - a
-        buf[i] = (buf[i] * ia + c[0] * a) // 255
-        buf[i + 1] = (buf[i + 1] * ia + c[1] * a) // 255
-        buf[i + 2] = (buf[i + 2] * ia + c[2] * a) // 255
+def vgrad(y0, y1, top, bottom):
+    n = max(1, y1 - y0)
+    for y in range(max(0, y0), min(H - 1, y1) + 1):
+        t = (y - y0) / n
+        r = _clamp(top[0] + (bottom[0] - top[0]) * t)
+        g = _clamp(top[1] + (bottom[1] - top[1]) * t)
+        b = _clamp(top[2] + (bottom[2] - top[2]) * t)
+        canvas[y][:] = bytes((r, g, b)) * W
 
-    def rect(self, x0, y0, x1, y1, c, alpha=255):
-        for y in range(int(y0), int(y1)):
-            self.blend_span(y, x0, x1, c, alpha)
 
-    def ellipse(self, cx, cy, rx, ry, c, alpha=255):
-        for dy in range(-int(ry), int(ry) + 1):
-            t = dy / ry
-            dx = int(rx * math.sqrt(max(0.0, 1.0 - t * t)))
-            self.blend_span(cy + dy, cx - dx, cx + dx + 1, c, alpha)
+def disc(cx, cy, r, rgb, a=255):
+    r0, g0, b0 = rgb
+    for y in range(max(0, cy - r), min(H - 1, cy + r) + 1):
+        dy = y - cy
+        dx = int(math.sqrt(max(0, r * r - dy * dy)))
+        _blend_row(canvas[y], cx - dx, cx + dx, r0, g0, b0, a)
 
-    def soft_ellipse(self, cx, cy, rx, ry, c, max_alpha):
-        """Elliptical soft shadow / glow with parabolic falloff."""
-        for dy in range(-int(ry), int(ry) + 1):
-            t = dy / ry
-            dx = int(rx * math.sqrt(max(0.0, 1.0 - t * t)))
-            y = cy + dy
-            if y < 0 or y >= self.h:
+
+def ellipse(cx, cy, rx, ry, rgb, a=255):
+    r0, g0, b0 = rgb
+    for y in range(max(0, cy - ry), min(H - 1, cy + ry) + 1):
+        t = (y - cy) / ry
+        dx = int(rx * math.sqrt(max(0.0, 1.0 - t * t)))
+        _blend_row(canvas[y], cx - dx, cx + dx, r0, g0, b0, a)
+
+
+def rrect(x0, y0, x1, y1, rad, rgb, a=255):
+    r0, g0, b0 = rgb
+    for y in range(max(0, y0), min(H - 1, y1) + 1):
+        if y < y0 + rad:
+            dy = y0 + rad - y
+            dx = int(rad - math.sqrt(max(0, rad * rad - dy * dy)))
+            xa, xb = x0 + dx, x1 - dx
+        elif y > y1 - rad:
+            dy = y - (y1 - rad)
+            dx = int(rad - math.sqrt(max(0, rad * rad - dy * dy)))
+            xa, xb = x0 + dx, x1 - dx
+        else:
+            xa, xb = x0, x1
+        _blend_row(canvas[y], xa, xb, r0, g0, b0, a)
+
+
+def poly_fill(pts, rgb, a=255):
+    r0, g0, b0 = rgb
+    ys = [p[1] for p in pts]
+    ymin = int(math.ceil(min(ys)))
+    ymax = int(math.floor(max(ys)))
+    n = len(pts)
+    for y in range(max(0, ymin), min(H - 1, ymax) + 1):
+        xs = []
+        for i in range(n):
+            px1, py1 = pts[i]
+            px2, py2 = pts[(i + 1) % n]
+            if (py1 <= y < py2) or (py2 <= y < py1):
+                t = (y - py1) / (py2 - py1)
+                xs.append(px1 + t * (px2 - px1))
+        xs.sort()
+        for k in range(0, len(xs) - 1, 2):
+            xa = int(math.ceil(xs[k]))
+            xb = int(math.floor(xs[k + 1]))
+            if xb >= xa:
+                _blend_row(canvas[y], xa, xb, r0, g0, b0, a)
+
+
+def soft_disc(cx, cy, r, rgb, a0):
+    R, G, B = rgb
+    r2 = float(r * r)
+    for y in range(max(0, cy - r), min(H - 1, cy + r) + 1):
+        dy = y - cy
+        row = canvas[y]
+        dx = int(math.sqrt(max(0, r2 - dy * dy)))
+        for x in range(max(0, cx - dx), min(W - 1, cx + dx) + 1):
+            ddx = x - cx
+            t = 1.0 - (ddx * ddx + dy * dy) / r2
+            if t <= 0:
                 continue
-            for x in range(cx - dx, cx + dx + 1):
-                if x < 0 or x >= self.w:
-                    continue
-                nx = (x - cx) / rx
-                ny = (y - cy) / ry
-                d2 = nx * nx + ny * ny
-                if d2 >= 1.0:
-                    continue
-                a = int(max_alpha * (1.0 - d2) * (1.0 - d2))
-                self.blend_pixel(x, y, c, a)
-
-    def rrect(self, x0, y0, x1, y1, r, c, alpha=255, color_fn=None):
-        """Rounded rect; color_fn(y) -> colour overrides c per row."""
-        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
-        for y in range(y0, y1):
-            inset = 0
-            if y < y0 + r:
-                dy = (y0 + r) - y
-                inset = int(r - math.sqrt(max(0.0, r * r - dy * dy)))
-            elif y >= y1 - r:
-                dy = y - (y1 - r)
-                inset = int(r - math.sqrt(max(0.0, r * r - dy * dy)))
-            col = color_fn(y) if color_fn else c
-            self.blend_span(y, x0 + inset, x1 - inset, col, alpha)
-
-    def polygon(self, pts, c, alpha=255):
-        """Scanline fill of a convex (or simple) polygon."""
-        if not pts:
-            return
-        ys = [p[1] for p in pts]
-        y0, y1 = int(max(0, min(ys))), int(min(self.h - 1, max(ys)))
-        n = len(pts)
-        for y in range(y0, y1 + 1):
-            xs = []
-            for i in range(n):
-                x1, y1p = pts[i]
-                x2, y2p = pts[(i + 1) % n]
-                if (y1p <= y < y2p) or (y2p <= y < y1p):
-                    t = (y - y1p) / (y2p - y1p)
-                    xs.append(x1 + t * (x2 - x1))
-            if len(xs) >= 2:
-                xs.sort()
-                self.blend_span(y, xs[0], xs[-1] + 1, c, alpha)
-
-    def line(self, x0, y0, x1, y1, c, width=1, alpha=255):
-        steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
-        for i in range(steps + 1):
-            t = i / max(1, steps)
-            x = x0 + (x1 - x0) * t
-            y = y0 + (y1 - y0) * t
-            self.ellipse(int(x), int(y), max(1, width // 2),
-                         max(1, width // 2), c, alpha)
-
-    def circle(self, cx, cy, r, c, alpha=255):
-        self.ellipse(cx, cy, r, r, c, alpha)
-
-    def ring(self, cx, cy, r_outer, r_inner, c, alpha=255):
-        for dy in range(-r_outer, r_outer + 1):
-            t = dy / r_outer
-            dx = int(r_outer * math.sqrt(max(0.0, 1.0 - t * t)))
-            for x in range(cx - dx, cx + dx + 1):
-                ddx, ddy = x - cx, y if False else dy
-                if ddx * ddx + ddy * ddy >= r_inner * r_inner:
-                    self.blend_pixel(x, cy + dy, c, alpha)
+            a = int(a0 * t * t)
+            if a <= 0:
+                continue
+            i = x * 3
+            inv = 255 - a
+            row[i] = (R * a + row[i] * inv) // 255
+            row[i + 1] = (G * a + row[i + 1] * inv) // 255
+            row[i + 2] = (B * a + row[i + 2] * inv) // 255
 
 
-# ---------------------------------------------------------------- tiny 5x7 font
+def soft_ellipse(cx, cy, rx, ry, rgb, a0):
+    R, G, B = rgb
+    for y in range(max(0, cy - ry), min(H - 1, cy + ry) + 1):
+        dy = (y - cy) / float(ry)
+        row = canvas[y]
+        dx = int(rx * math.sqrt(max(0.0, 1.0 - dy * dy)))
+        for x in range(max(0, cx - dx), min(W - 1, cx + dx) + 1):
+            t = 1.0 - ((x - cx) / float(rx)) ** 2 - dy * dy
+            if t <= 0:
+                continue
+            a = int(a0 * t * t)
+            if a <= 0:
+                continue
+            i = x * 3
+            inv = 255 - a
+            row[i] = (R * a + row[i] * inv) // 255
+            row[i + 1] = (G * a + row[i + 1] * inv) // 255
+            row[i + 2] = (B * a + row[i + 2] * inv) // 255
 
+
+def line(x0, y0, x1, y1, rgb, a=255):
+    R, G, B = rgb
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    x, y = x0, y0
+    while True:
+        if 0 <= x < W and 0 <= y < H:
+            row = canvas[y]
+            i = x * 3
+            inv = 255 - a
+            row[i] = (R * a + row[i] * inv) // 255
+            row[i + 1] = (G * a + row[i + 1] * inv) // 255
+            row[i + 2] = (B * a + row[i + 2] * inv) // 255
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+
+
+# --- tiny 5x7 bitmap font (only the glyphs the labels need) ---
 FONT = {
     'A': ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'B': ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
     'C': ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
-    'D': ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
     'E': ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     'F': ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    'G': ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
-    'H': ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
     'I': ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
-    'J': ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
-    'K': ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    'L': ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-    'M': ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
-    'N': ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
     'O': ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
     'P': ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
-    'Q': ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
     'R': ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
     'S': ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
     'T': ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    'U': ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'V': ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
     'W': ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
-    'X': ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
-    'Y': ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
-    'Z': ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
     '0': ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
     '1': ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
     '2': ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
-    '3': ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
-    '4': ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    '5': ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    '6': ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
-    '7': ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    '8': ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    '9': ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
     '-': ("00000", "00000", "00000", "01110", "00000", "00000", "00000"),
+    '·': ("00000", "00000", "00000", "00100", "00000", "00000", "00000"),
     ' ': ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
-    '.': ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
-    chr(183): ("00000", "00000", "00000", "00100", "00000", "00000", "00000"),
 }
 
 
 def text_width(s, scale):
-    return len(s) * (5 * scale + scale) - scale
+    return len(s) * 6 * scale - scale
 
 
-def draw_text(cv, x, y, s, scale, color):
-    cx = x
+def draw_text(s, cx, y, scale, rgb, a=255):
+    x = cx - text_width(s, scale) // 2
     for ch in s:
         glyph = FONT.get(ch, FONT[' '])
-        for row in range(7):
-            bits = glyph[row]
-            for col in range(5):
-                if bits[col] == '1':
-                    cv.rect(cx + col * scale, y + row * scale,
-                            cx + col * scale + scale, y + row * scale + scale,
-                            color)
-        cx += 6 * scale
+        for ri, bits in enumerate(glyph):
+            for ci, bit in enumerate(bits):
+                if bit == '1':
+                    fill_rect(x + ci * scale, y + ri * scale,
+                              scale, scale, rgb, a)
+        x += 6 * scale
 
 
-# ---------------------------------------------------------------- PNG encoder
+# --- brushed chrome: horizontal gradient stops across the body ---
+CHROME_STOPS = [
+    (300, (146, 148, 152)),
+    (332, (206, 207, 209)),
+    (382, (239, 240, 241)),
+    (436, (196, 197, 199)),
+    (506, (228, 229, 231)),
+    (580, (243, 244, 245)),
+    (642, (198, 199, 201)),
+    (692, (232, 233, 235)),
+    (724, (158, 160, 164)),
+]
 
-def write_png(path, cv):
+
+def _chrome_at(x):
+    if x <= CHROME_STOPS[0][0]:
+        return CHROME_STOPS[0][1]
+    for (x0, c0), (x1, c1) in zip(CHROME_STOPS, CHROME_STOPS[1:]):
+        if x0 <= x <= x1:
+            t = (x - x0) / float(x1 - x0)
+            return tuple(_clamp(c0[i] + (c1[i] - c0[i]) * t) for i in range(3))
+    return CHROME_STOPS[-1][1]
+
+
+CHROME_COLS = [_chrome_at(x) for x in range(300, 725)]
+
+
+def draw_chrome_body(x0, y0, x1, y1, rad):
+    for y in range(y0, y1 + 1):
+        if y < y0 + rad:
+            dy = y0 + rad - y
+            dx = int(rad - math.sqrt(max(0, rad * rad - dy * dy)))
+            xa, xb = x0 + dx, x1 - dx
+        elif y > y1 - rad:
+            dy = y - (y1 - rad)
+            dx = int(rad - math.sqrt(max(0, rad * rad - dy * dy)))
+            xa, xb = x0 + dx, x1 - dx
+        else:
+            xa, xb = x0, x1
+        shade = 1.0
+        shade += 0.07 * math.exp(-((y - 446) / 16.0) ** 2)  # top highlight
+        shade -= 0.06 * math.exp(-((y - 758) / 22.0) ** 2)  # bottom shade
+        brush = 3.0 * math.sin(y * 1.9) + 2.0 * math.sin(y * 0.83 + 1.2)
+        row = canvas[y]
+        for x in range(xa, xb + 1):
+            cr, cg, cb = CHROME_COLS[x - 300]
+            i = x * 3
+            row[i] = _clamp(cr * shade + brush)
+            row[i + 1] = _clamp(cg * shade + brush)
+            row[i + 2] = _clamp(cb * shade + brush)
+
+
+def draw_cube(cx, cy, s, tilt_deg, with_glow=True):
+    """A translucent glowing ice cube: front face + top + right faces."""
+    if with_glow:
+        soft_disc(cx, cy - 6, int(s * 1.05), (186, 222, 244), 66)
+        soft_disc(cx, cy - 6, int(s * 0.68), (228, 244, 252), 55)
+    th = math.radians(tilt_deg)
+    ct, st = math.cos(th), math.sin(th)
+
+    def rot(px, py):
+        return (cx + px * ct - py * st, cy + px * st + py * ct)
+
+    h = s / 2.0
+    d = s * 0.32
+    front = [(-h, -h), (h, -h), (h, h), (-h, h)]
+    top = [(-h, -h), (h, -h), (h + d, -h - d), (-h + d, -h - d)]
+    right = [(h, -h), (h + d, -h - d), (h + d, h - d), (h, h)]
+    poly_fill([rot(*p) for p in front], (198, 228, 243))
+    poly_fill([rot(*p) for p in right], (140, 193, 226))
+    poly_fill([rot(*p) for p in top], (236, 248, 255))
+    # crisp white edges around the silhouette and the inner seams
+    outline = [(-h, -h), (h + d, -h - d), (h + d, h - d), (h, h), (-h, h)]
+    pts = [rot(*p) for p in outline]
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        line(int(a[0]), int(a[1]), int(b[0]), int(b[1]),
+             (255, 255, 255), 220)
+    ft = [rot(-h, -h), rot(h, -h)]
+    line(int(ft[0][0]), int(ft[0][1]), int(ft[1][0]), int(ft[1][1]),
+         (255, 255, 255), 200)
+    fr = [rot(h, -h), rot(h, h)]
+    line(int(fr[0][0]), int(fr[0][1]), int(fr[1][0]), int(fr[1][1]),
+         (255, 255, 255), 200)
+    # frost speckles inside the front face
+    for _ in range(14):
+        px = rng.uniform(-h + 8, h - 8)
+        py = rng.uniform(-h + 8, h - 8)
+        qx, qy = rot(px, py)
+        fill_rect(int(qx), int(qy), 3, 3, (255, 255, 255), 150)
+    # sparkle on the top face
+    sx, sy = rot(h * 0.45, -h * 0.45)
+    sx, sy = int(sx), int(sy)
+    line(sx - 9, sy, sx + 9, sy, (255, 255, 255), 235)
+    line(sx, sy - 9, sx, sy + 9, (255, 255, 255), 235)
+    disc(sx, sy, 3, (255, 255, 255), 235)
+
+
+def steam_wisp(x_base, top_y, phase, drift):
+    steps = 14
+    for k in range(steps):
+        t = k / float(steps - 1)
+        y = int(432 - (432 - top_y) * t)
+        x = int(x_base + drift * t + 16 * math.sin(t * 5.0 + phase))
+        r = int(13 + 20 * t)
+        a = int(30 - 20 * t)
+        soft_disc(x, y, r, (255, 255, 255), max(6, a))
+
+
+def build():
+    # studio backdrop: pale wall above, slightly darker surface below
+    vgrad(0, 800, (243, 241, 236), (222, 218, 210))
+    vgrad(800, 1024, (216, 211, 204), (198, 192, 184))
+    # soft contact shadows (drawn first, products sit on top of them)
+    soft_ellipse(512, 796, 315, 42, (58, 52, 44), 62)
+    soft_ellipse(820, 884, 145, 24, (58, 52, 44), 52)
+
+    # --- the single accessory: white plate holding one spare ice cube ---
+    ellipse(820, 862, 152, 46, (206, 204, 201))
+    ellipse(820, 859, 146, 43, (252, 252, 250))
+    ellipse(820, 856, 128, 34, (238, 238, 236))
+    draw_cube(820, 806, 64, 10)
+
+    # --- the toaster: brushed-chrome body ---
+    draw_chrome_body(300, 430, 724, 770, 26)
+    # slots on the top face
+    rrect(356, 436, 474, 460, 10, (36, 38, 42))
+    rrect(550, 436, 668, 460, 10, (36, 38, 42))
+    line(360, 458, 470, 458, (140, 142, 146), 150)
+    line(554, 458, 664, 458, (140, 142, 146), 150)
+    # seam, lever, browning dial, feet
+    line(312, 470, 712, 470, (120, 122, 126), 90)
+    fill_rect(724, 580, 34, 12, (110, 112, 116))
+    rrect(750, 568, 776, 604, 9, (88, 90, 94))
+    rrect(754, 572, 772, 600, 7, (150, 152, 156))
+    disc(368, 700, 20, (96, 98, 102))
+    disc(368, 700, 16, (178, 180, 184))
+    line(368, 700, 379, 692, (60, 62, 66), 255)
+    rrect(338, 768, 386, 784, 6, (42, 42, 44))
+    rrect(638, 768, 686, 784, 6, (42, 42, 44))
+
+    # cold glow reflected on the toaster's top face
+    soft_disc(415, 472, 85, (172, 212, 236), 22)
+    # steam rising from both slots, curling around the popping cube
+    steam_wisp(392, 196, 0.4, -18)
+    steam_wisp(436, 176, 2.1, 10)
+    steam_wisp(470, 220, 4.0, 26)
+    steam_wisp(600, 210, 1.2, -8)
+    steam_wisp(636, 240, 3.3, 14)
+    # --- the hero: a glowing ice cube popping out of the left slot ---
+    draw_cube(415, 360, 150, -10)
+
+    # --- product label, embossed on the chrome ---
+    draw_text("TOAST-O-FROST", 512, 585, 4, (255, 255, 255), 110)
+    draw_text("TOAST-O-FROST", 512, 583, 4, (52, 54, 58), 255)
+    draw_text("1200W · CRISP ICE", 512, 630, 2, (70, 72, 76), 255)
+
+
+def _chunk(tag, data):
+    out = struct.pack(">I", len(data)) + tag + data
+    out += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    return out
+
+
+def write_png(path):
     raw = bytearray()
-    stride = W * 3
-    for y in range(H):
+    for row in canvas:
         raw.append(0)
-        raw += cv.buf[y * stride:(y + 1) * stride]
-
-    def chunk(typ, data):
-        out = struct.pack('>I', len(data)) + typ + data
-        out += struct.pack('>I', zlib.crc32(typ + data) & 0xffffffff)
-        return out
-
-    png = b'\x89PNG\r\n\x1a\n'
-    png += chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0))
-    png += chunk(b'IDAT', zlib.compress(bytes(raw), 6))
-    png += chunk(b'IEND', b'')
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    with open(path, 'wb') as f:
+        raw.extend(row)
+    comp = zlib.compress(bytes(raw), 9)
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+    png += _chunk(b"IDAT", comp)
+    png += _chunk(b"IEND", b"")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
         f.write(png)
     return len(png)
 
 
-# ---------------------------------------------------------------- scene
-
-def rot(px, py, cx, cy, ang):
-    ca, sa = math.cos(ang), math.sin(ang)
-    dx, dy = px - cx, py - cy
-    return (cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
-
-
-def draw_ice_cube(cv, cx, cy, s, tilt=-0.14):
-    """Translucent ice cube, top face bright, tilted. cy = cube centre."""
-    top = rot(cx, cy - s * 0.52, cx, cy, tilt)
-    right = rot(cx + s * 0.52, cy - s * 0.20, cx, cy, tilt)
-    bottom = rot(cx, cy + s * 0.12, cx, cy, tilt)
-    left = rot(cx - s * 0.52, cy - s * 0.20, cx, cy, tilt)
-    bl = rot(cx - s * 0.52, cy + s * 0.44, cx, cy, tilt)
-    bb = rot(cx, cy + s * 0.76, cx, cy, tilt)
-    br = rot(cx + s * 0.52, cy + s * 0.44, cx, cy, tilt)
-    # left + right faces (slightly translucent over whatever is behind)
-    cv.polygon([left, bottom, bb, bl], (186, 219, 238), 235)
-    cv.polygon([right, bottom, bb, br], (148, 193, 224), 235)
-    # top face, brightest
-    cv.polygon([top, right, bottom, left], (232, 245, 252), 245)
-    # edges
-    edge = (118, 168, 202)
-    for a, b in [(top, right), (right, bottom), (bottom, left), (left, top),
-                 (left, bl), (bl, bb), (bb, br), (br, right),
-                 (bottom, bb)]:
-        cv.line(int(a[0]), int(a[1]), int(b[0]), int(b[1]), edge, 2, 200)
-    # inner diagonal refraction streaks
-    cv.line(int(left[0] + 8), int(left[1] + 26), int(bottom[0] - 6),
-            int(bottom[1] + 34), (255, 255, 255), 3, 110)
-    cv.line(int(right[0] - 10), int(right[1] + 22), int(bottom[0] + 8),
-            int(bottom[1] + 30), (255, 255, 255), 2, 90)
-    cv.line(int(top[0] - 14), int(top[1] + 12), int(bottom[0] - 2),
-            int(bottom[1] - 6), (255, 255, 255), 3, 130)
-    # bright highlight on the top face
-    hx, hy = int(top[0] - 6), int(top[1] + 10)
-    cv.ellipse(hx, hy, 16, 7, (255, 255, 255), 200)
-    cv.ellipse(hx, hy, 8, 4, (255, 255, 255), 220)
-
-
-def draw_steam(cv, x0, y_top, y_base):
-    """Two thin translucent wisps curling upward."""
-    for phase, dx0, amp in [(0.0, -14, 11), (1.4, 16, 9)]:
-        steps = 26
-        for i in range(steps):
-            t = i / (steps - 1)
-            y = y_base - t * (y_base - y_top)
-            x = x0 + dx0 * t + math.sin(t * 5.0 + phase) * amp * t
-            r = 5 + 8 * t
-            a = int(82 * (1.0 - t) + 12)
-            cv.ellipse(int(x), int(y), int(r), int(r * 1.25),
-                       (255, 255, 255), a)
-
-
-def render():
-    rng = random.Random(SEED)
-    cv = Canvas(W, H)
-
-    # --- studio seamless background: warm off-white, lighter at top ---
-    top_c = (250, 247, 240)
-    bot_c = (233, 226, 212)
-    for y in range(H):
-        t = y / (H - 1)
-        # gentle ease so the floor area darkens a little more
-        c = lerp_c(top_c, bot_c, t * t * 0.6 + t * 0.4)
-        cv.span(y, 0, W, c)
-    # soft radial key light, upper centre
-    cv.soft_ellipse(512, 380, 560, 460, (255, 255, 255), 26)
-
-    # --- contact shadows ---
-    cv.soft_ellipse(470, 806, 265, 42, (90, 78, 60), 78)
-    cv.soft_ellipse(470, 806, 200, 30, (70, 58, 44), 90)
-    cv.soft_ellipse(848, 800, 118, 26, (90, 78, 60), 70)
-
-    # --- toaster body: front face, vertical brushed chrome gradient ---
-    bx0, bx1, by0, by1 = 258, 662, 420, 782
-    grad_top = (226, 230, 233)
-    grad_bot = (176, 182, 188)
-
-    def body_row(y):
-        t = (y - by0) / (by1 - by0)
-        return lerp_c(grad_top, grad_bot, t)
-
-    cv.rrect(bx0, by0, bx1, by1, 30, grad_top, color_fn=body_row)
-
-    # brushed-metal streaks (seeded, subtle vertical lines)
-    for _ in range(150):
-        x = rng.randint(bx0 + 8, bx1 - 8)
-        light = rng.random() < 0.55
-        a = rng.randint(5, 15)
-        col = (255, 255, 255) if light else (120, 126, 132)
-        for y in range(by0 + 12, by1 - 12):
-            cv.blend_pixel(x, y, col, a)
-
-    # bright specular band from the upper-left key light
-    cv.polygon([(300, by0), (430, by0), (330, by1), (268, by1)],
-               (255, 255, 255), 46)
-    cv.polygon([(430, by0), (470, by0), (380, by1), (330, by1)],
-               (255, 255, 255), 22)
-
-    # --- right side face (darker chrome) ---
-    cv.polygon([(bx1, by0 + 6), (706, by0 - 26), (706, 748), (bx1, by1 - 4)],
-               (150, 156, 162), 255)
-    # side-face vertical shading
-    for i in range(44):
-        t = i / 43
-        x = int(lerp(bx1, 706, t))
-        col = lerp_c((150, 156, 162), (128, 134, 141), t)
-        cv.line(x, by0 - 20 + int(t * 26), x, by1 - 10 - int(t * 30),
-                col, 1, 255)
-
-    # --- top face ---
-    cv.polygon([(bx0 + 4, by0), (bx1, by0 + 6), (706, by0 - 26),
-                (bx0 + 48, by0 - 26)], (238, 241, 244), 255)
-    cv.polygon([(bx0 + 4, by0), (bx1, by0 + 6), (706, by0 - 26),
-                (bx0 + 48, by0 - 26)], (255, 255, 255), 40)
-
-    # --- slots on the top face (dark openings) ---
-    # slot 1 (left, holds the ice cube), slot 2 (right, empty)
-    cv.polygon([(318, 402), (428, 402), (452, 388), (342, 388)],
-               (28, 30, 33), 255)
-    cv.polygon([(486, 402), (596, 402), (620, 388), (510, 388)],
-               (28, 30, 33), 255)
-    cv.polygon([(318, 402), (428, 402), (452, 388), (342, 388)],
-               (90, 96, 102), 60)
-    # slot inner rims
-    cv.line(318, 402, 428, 402, (70, 74, 80), 2, 255)
-    cv.line(486, 402, 596, 402, (70, 74, 80), 2, 255)
-
-    # --- the joke: one glowing ice cube half-popped out of slot 1 ---
-    # Cube sits low so its lower third is inside the toaster; the top
-    # face is then redrawn over it, so the cube visibly emerges from
-    # the slot instead of floating on a bar.
-    draw_ice_cube(cv, 388, 329, 118)
-    cv.polygon([(bx0 + 4, by0), (bx1, by0 + 6), (706, by0 - 26),
-                (bx0 + 48, by0 - 26)], (238, 241, 244), 255)
-    # slot 2 redrawn (the top-face redraw covered it)
-    cv.polygon([(486, 402), (596, 402), (620, 388), (510, 388)],
-               (28, 30, 33), 255)
-    cv.line(486, 402, 596, 402, (70, 74, 80), 2, 255)
-    # slot 1: only the sliver left of the cube stays visible
-    cv.polygon([(318, 402), (334, 402), (346, 388), (330, 388)],
-               (28, 30, 33), 255)
-    cv.line(318, 402, 334, 402, (70, 74, 80), 2, 255)
-
-    # --- steam wisps above the cube ---
-    draw_steam(cv, 388, 160, 276)
-
-    # --- chrome lever on the right side, pressed down ---
-    cv.rect(668, 560, 678, 660, (52, 54, 58), 255)
-    cv.polygon([(668, 640), (700, 636), (700, 652), (668, 656)],
-               (205, 209, 213), 255)
-    cv.circle(704, 644, 13, (28, 30, 33), 255)
-    cv.circle(701, 641, 5, (90, 96, 102), 255)
-
-    # --- browning dial on the front face ---
-    dcx, dcy, dr = 566, 648, 44
-    cv.circle(dcx, dcy, dr + 5, (120, 126, 132), 255)
-    cv.circle(dcx, dcy, dr, (238, 240, 242), 255)
-    for k in range(9):
-        ang = math.radians(-210 + k * 30)
-        x1 = dcx + int(math.cos(ang) * (dr - 4))
-        y1 = dcy + int(math.sin(ang) * (dr - 4))
-        x2 = dcx + int(math.cos(ang) * (dr - 12))
-        y2 = dcy + int(math.sin(ang) * (dr - 12))
-        cv.line(x1, y1, x2, y2, (70, 74, 80), 2, 255)
-    # pointer at "crisp" (upper right)
-    pa = math.radians(-50)
-    cv.line(dcx, dcy, dcx + int(math.cos(pa) * (dr - 12)),
-            dcy + int(math.sin(pa) * (dr - 12)), (40, 42, 46), 4, 255)
-    cv.circle(dcx, dcy, 7, (60, 64, 70), 255)
-
-    # --- brand plate + product-only text ---
-    cv.rrect(300, 516, 512, 566, 8, (196, 200, 204), 255)
-    cv.rrect(300, 516, 512, 566, 8, (140, 146, 152), 90)
-    brand = "TOAST-O-FROST"
-    tw = text_width(brand, 2)
-    draw_text(cv, 306 + (200 - tw) // 2, 530, brand, 2, (52, 56, 62))
-    sub = "1200W " + chr(183) + " CRISP ICE"
-    tw2 = text_width(sub, 2)
-    draw_text(cv, 300 + (362 - tw2) // 2, 586, sub, 2, (74, 78, 84))
-
-    # --- tiny red indicator light ---
-    cv.soft_ellipse(620, 540, 16, 16, (255, 60, 50), 70)
-    cv.circle(620, 540, 8, (214, 38, 30), 255)
-    cv.circle(617, 537, 3, (255, 140, 130), 255)
-
-    # --- feet ---
-    for fx in (292, 596):
-        cv.rrect(fx, 780, fx + 40, 796, 5, (30, 32, 35), 255)
-    cv.rrect(668, 748, 700, 762, 5, (30, 32, 35), 255)
-
-    # --- the ONE accessory: white ceramic plate, one spare ice cube ---
-    cv.ellipse(848, 762, 118, 40, (226, 222, 214), 255)
-    cv.ellipse(848, 756, 118, 40, (252, 251, 248), 255)
-    cv.ellipse(848, 756, 96, 30, (238, 236, 232), 255)
-    # melt puddle beside the spare cube
-    cv.ellipse(892, 770, 42, 11, (178, 208, 228), 150)
-    cv.ellipse(892, 770, 30, 8, (200, 222, 238), 130)
-    # spare ice cube on the plate
-    draw_ice_cube(cv, 838, 716, 62, tilt=0.22)
-
-    # --- gentle vignette to keep the hero centred ---
-    cv.soft_ellipse(512, 512, 760, 760, (120, 100, 70), 0)  # no-op guard
-    return cv
-
-
 def main():
-    out = os.environ.get("ENTRY_OUTPUT", "/output/entry.png")
-    cv = render()
-    n = write_png(out, cv)
-    print(f"wrote {out} ({n} bytes)")
+    build()
+    size = write_png(OUT)
+    with open(OUT, "rb") as f:
+        data = f.read()
+    digest = hashlib.sha256(data).hexdigest()
+    w, h = struct.unpack(">II", data[16:24])
+    print("output:", OUT)
+    print("size_bytes:", size)
+    print("sha256:", digest)
+    print("dimensions:", w, "x", h)
+    gate = (data[:8] == b"\x89PNG\r\n\x1a\n" and w == 1024 and h == 1024
+            and size <= 1048576)
+    print("gate_valid:", 1 if gate else 0)
 
 
 if __name__ == "__main__":

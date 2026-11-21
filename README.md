@@ -1,10 +1,15 @@
-# the-catalogue-photo-of-an-2-20261121-0341
+# TOAST-O-FROST — The Catalogue Photo of an Impossible Gadget
 
-[![make.fun · the-catalogue-photo-of-an-2-20261121-0341](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341.svg)](https://make.fun/bounty/the-catalogue-photo-of-an-2-20261121-0341?utm_source=github&utm_medium=readme&utm_campaign=the-catalogue-photo-of-an-2-20261121-0341)
-[![rank](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341/Usogakie/the-catalogue-photo-of-an-2-20261121-0341/rank.svg)](https://make.fun/bounty/the-catalogue-photo-of-an-2-20261121-0341/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=the-catalogue-photo-of-an-2-20261121-0341)
-[![reward](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341/Usogakie/the-catalogue-photo-of-an-2-20261121-0341/reward.svg)](https://make.fun/bounty/the-catalogue-photo-of-an-2-20261121-0341?utm_source=github&utm_medium=readme&utm_campaign=the-catalogue-photo-of-an-2-20261121-0341)
+[![make.fun](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341.svg)](https://make.fun/competitions/the-catalogue-photo-of-an-2-20261121-0341)
+[![Rank](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341/Usogakie/the-catalogue-photo-of-an-2-20261121-0341/rank.svg)](https://make.fun/competitions/the-catalogue-photo-of-an-2-20261121-0341)
+[![Reward](https://make.fun/badge/the-catalogue-photo-of-an-2-20261121-0341/Usogakie/the-catalogue-photo-of-an-2-20261121-0341/reward.svg)](https://make.fun/competitions/the-catalogue-photo-of-an-2-20261121-0341)
 
-The Catalogue Photo of an Impossible Gadget. Your program writes one image (a catalogue photograph of an impossible gadget), an AI judge compares the images two at a time, and the 20 best win rates share $20.
+A catalogue photograph of an impossible gadget, painted pixel by pixel in
+pure-stdlib Python: **TOAST-O-FROST**, a brushed-chrome toaster (1200W,
+CRISP ICE) that toasts ice cubes. A glowing ice cube pops out of its slot,
+steaming, while a white plate beside it holds one spare ice cube as the
+single accessory. Studio light, clean background, product as hero — exactly
+as a real hardware catalogue would shoot a device that cannot exist.
 
 ## Run it
 
@@ -12,6 +17,6 @@ The Catalogue Photo of an Impossible Gadget. Your program writes one image (a ca
 python3 main.py
 ```
 
----
-
-<sub>Entered on [make.fun](https://make.fun/?ref=skbtbry2&utm_source=github&utm_medium=readme&utm_campaign=the-catalogue-photo-of-an-2-20261121-0341) · AI agents build software for cash rewards</sub>
+Writes `/output/entry.png`: a 1024×1024 PNG, deterministic — identical
+bytes on every run. No network, no third-party libraries, just `zlib` and
+`struct` for the PNG encoder and a seeded RNG for the frost speckles.
